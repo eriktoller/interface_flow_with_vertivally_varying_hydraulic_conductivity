@@ -1,121 +1,244 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Interface with varying hydraulic conductivity %
-% Solution for interface flow                   %
+% Solution for Bratto island                    %
 % Erik Toller                                   %
 % 2019-05-28                                    %
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-close all
-clear all
-clc
 
-% Definition of Varibales
+close all
+clc
+format long
+tic
+load geometry
+%% Definition of Varibales
+% Aquifer
 fi0 = 0;
-fi1 = 10;
-fi2 = 5;
-fi3 = 1;
 rho_f = 1000;
 rho_s = 1025;
-fac = 1.2;
-lambda = 10;
-lambda2 = 10;
-lambda3 = 10;
-k0 = 1.2*10^-6;
-L = 100;
-x0 = 0;
-x1 = L;
+lambda = 140;
+k0 = 0.0047;
+eta = 200;
+H_s = fi0;
 
-% Constants calculations
+% Hydraulic Conductivty Calculations
 alpha = rho_f/(rho_s-rho_f);
-kc = 2*k0*lambda^2*((exp(fi1/lambda)-1)+(1/alpha)*(exp(-alpha*fi1/lambda)-1))/((1+alpha)*fi1^2);
-kc2 = 2*k0*lambda2^2*((exp(fi2/lambda2)-1)+(1/alpha)*(exp(-alpha*fi2/lambda2)-1))/((1+alpha)*fi2^2);
-kc3 = 2*k0*lambda3^2*((exp(fi3/lambda3)-1)+(1/alpha)*(exp(-alpha*fi3/lambda3)-1))/((1+alpha)*fi3^2);
 
-% Uniform flow
-Phi0 = Phi_from_fi_dimless(fi0,lambda,alpha)./k0;
-Phi1 = Phi_from_fi_dimless(fi1,lambda,alpha)./k0;
-Qx0 = (Phi1-Phi0)/L;
-Phi02 = Phi_from_fi_dimless(fi0,lambda2,alpha)./k0;
-Phi12 = Phi_from_fi_dimless(fi2,lambda2,alpha)./k0;
-Qx02 = (Phi12-Phi02)/L;
-Phi03 = Phi_from_fi_dimless(fi0,lambda3,alpha)./k0;
-Phi13 = Phi_from_fi_dimless(fi3,lambda3,alpha)./k0;
-Qx03 = (Phi13-Phi03)/L;
+% Reference point
+z_ref = complex(661500,6423500);
+Phi0 = Phi_from_fi(fi0,k0,lambda,alpha);
 
-disp('Phi0')
-disp(Phi0)
+% Wells
+rw = bratto_wells(:,3)./1000;
+fi_bottom_well = bratto_wells(:,4);
+fi_max_well = fi_bottom_well./alpha;
+zw = complex(bratto_wells(:,1),bratto_wells(:,2));
+nw = length(zw);
 
 
-% Tester
-disp('Start Check')
-inc = 0.001;
-[fi_array,Phi_head] = make_fi_array(@(fi)Phi_from_fi_dimless(fi,lambda,alpha)./k0,0,fi1*1.1,inc);
-func_fi = @(x)fi_solver(x,@(x)Phi_total(x,Qx0,Phi0),Phi_head, fi_array);
-[fi_array2,Phi_head2] = make_fi_array(@(fi)Phi_from_fi_dimless(fi,lambda2,alpha)./k0,0,fi2*1.1,inc);
-func_fi2 = @(x)fi_solver(x,@(x)Phi_total(x,Qx02,Phi02),Phi_head2, fi_array2);
-[fi_array3,Phi_head3] = make_fi_array(@(fi)Phi_from_fi_dimless(fi,lambda3,alpha)./k0,0,fi3*1.1,inc);
-func_fi3 = @(x)fi_solver(x,@(x)Phi_total(x,Qx03,Phi03),Phi_head3, fi_array3);
+% Analytical Elements (island boundary)
+z_1 = complex(bratto_boundary(:,1),bratto_boundary(:,2));
+z_2 = z_1;
+z_2(1) = [];
+z_2(end+1) = z_1(1);
+z_1 = [z_1;complex(bratto_lake(:,1),bratto_lake(:,2))];
+z_2 = [z_2;complex(bratto_lake(:,3),bratto_lake(:,4))];
 
-
-fi_test(1) = func_fi(x0);
-fi_test(2) = func_fi(x1);
-fi_check = abs(fi_test/[fi0,fi1]);
-if fi_check > 0.99
-    disp('Check OK')
-else
-    disp('Check NOT OK')
+% adding the wells (as analytical elements)
+num = length(z_1);
+for ii = 1:nw
+    z_1(num+ii) = zw(ii)+complex(rw(ii),0);
+    z_2(num+ii) = zw(ii)-complex(rw(ii),0);
 end
 
+% Pre-calculations and defentions for iterative sovler
+M = length(z_1);
+nu = [linspace(1,1,num-2),0.3,1,linspace(0,0,nw)];
+fi_lake = [linspace(H_s,H_s,num-2),60,10,fi_max_well'];
+m = 40;
+m_coef = [linspace(m,m,num),linspace(1,1,nw)];
+N = 800;
 
-% Plotting Solver
-disp('Start plotting')
-xx = linspace(x0-10,x1,100);
-fi = func_fi(xx);
-fi_2 = func_fi2(xx);
-fi_3 = func_fi3(xx);
+chi_far = zeros(1,M);
+for ii = 1:M
+    chi_far(ii) = chi_of_lz_e(z_ref,nu(ii),z_1(ii),z_2(ii));
+end
 
-[h_s] = h_s_from_fi(fi,alpha);
-[h_s2] = h_s_from_fi(fi_2,alpha);
-[h_s3] = h_s_from_fi(fi_3,alpha);
+Phi_lake = zeros(1,M); 
+for ii = 1:M
+    Phi_lake(ii) = Phi_from_fi(fi_lake(ii),k0,lambda,alpha);
+end
 
-Phi0_const = Phi_from_fi_const_dimless(fi0,kc,k0,lambda,alpha);
-Phi1_const = Phi_from_fi_const_dimless(fi1,kc,k0,lambda,alpha);
+% Infiltration
+range = 1:length(bratto_infiltration);
+zc1 = complex(bratto_infiltration(range,1),bratto_infiltration(range,2));
+zc2 = complex(bratto_infiltration(range,3),bratto_infiltration(range,4));
+g0 = bratto_infiltration(:,5)*20;
+
+%% Coefficient solver
+[a,Q,C] = solve_lakes_e(Phi0,Phi_lake,M,N,m_coef,z_1,z_2,nu,chi_far,zc1,zc2,g0,z_ref);
+
+%% Head functions
+inc = 0.001;
+[fi_array,Phi_head] = make_fi_array(@(fi)Phi_from_fi(fi,k0,lambda,alpha),min(fi_lake),eta,inc);
+
+func_fi = @(z)fi_solver(z,@(z)real(Omega_total_e( z,0,z_1,z_2,nu,a,Q,chi_far,M,m_coef,C,zc1,zc2,g0)),...
+    Phi_head, fi_array);
+
+func_Phi = @(z)real(Omega_total_e( z,0,z_1,z_2,nu,a,Q,chi_far,M,m_coef,C,zc1,zc2,g0));
+
+func_Omega = @(z) Omega_total_e( z,0,z_1,z_2,nu,a,Q,chi_far,M,m_coef,C,zc1,zc2,g0);
 
 
-fi_const = real(fi_from_Phi_const(xx,@(x)Phi_total(x,Qx0,0),kc./k0,k0,lambda,alpha)) ;
-[h_s_const] = h_s_from_fi(fi_const,alpha);
-fi_const2 = real(fi_from_Phi_const(xx,@(x)Phi_total(x,Qx02,0),kc2./k0,k0,lambda2,alpha)) ;
-[h_s_const2] = h_s_from_fi(fi_const2,alpha);
-fi_const3 = real(fi_from_Phi_const(xx,@(x)Phi_total(x,Qx03,0),kc3./k0,k0,lambda3,alpha)) ;
-[h_s_const3] = h_s_from_fi(fi_const3,alpha);
+%% Plotting data
+xfrom = min(real(z_1))-100;
+xto = max(real(z_1))+100;
+Nx = 100;
+yfrom = min(imag(z_1))-100;
+yto = max(imag(z_1))+100;
+Ny = Nx;
+nint = 30;
 
-% Plotting
-figure(1)
+%% Plotting
+%% Discharge Potential
+
+disp('Plotting flow net')
+figure;
+ContourMe_flow_net(xfrom,xto,Nx,yfrom,yto,Ny,func_Phi,nint);
+
+legend off
+axis equal
 hold on
-plot(xx./lambda,fi./lambda,'blue -')
-plot(xx./lambda,h_s./lambda,'red -')
-plot(xx./lambda,fi_const./lambda,'blue -.')
-plot(xx./lambda,h_s_const./lambda,'red -.')
 
-plot(xx./lambda2,fi_2./lambda2,'blue -')
-plot(xx./lambda2,h_s2./lambda2,'red -')
-plot(xx./lambda2,fi_const2./lambda2,'blue -.')
-plot(xx./lambda2,h_s_const2./lambda2,'red -.')
+ellipse_c(z_1,z_2,nu,'black');
+ellipse_c(zc1,zc2,linspace(1,1,length(zc1)),'red');
+plot(z_ref,'blue d')
+plot(zw,'blue *')
+title('Discharge Potential')
+xlabel('E-coordinate [-]')
+ylabel('N-coordinate [-]')
+disp('done')
+  
+%% Head contour
+disp('Plotting head contour')
+figure;
+fi_grid = ContourMe_fi(xfrom,xto,Nx,yfrom,yto,Ny,func_fi,nint);
 
-plot(xx./lambda3,fi_3./lambda3,'blue -')
-plot(xx./lambda3,h_s3./lambda3,'red -')
-plot(xx./lambda3,fi_const3./lambda3,'blue -.')
-plot(xx./lambda3,h_s_const3./lambda3,'red -.')
+legend off
+axis equal
+hold on
 
-title('Interface Flow Comparison, k=k(z) and k=k_{c}')
-xlabel('x/\lambda-direction [-]')
-ylabel('z/\lambda [-]')
+ellipse_c(z_1,z_2,nu,'black');
+ellipse_c(zc1,zc2,linspace(1,1,length(zc1)),'red');
+plot(z_ref,'blue d')
+plot(zw,'blue *')
+title('Hydraulic Head')
+xlabel('E-coordinate [-]')
+ylabel('N-coordinate [-]')
+disp('done')
 
-text(xx(70)./lambda,h_s(70)./lambda+1,'k=k(z)/k_0')
-text(xx(70)./lambda,h_s_const(70)./lambda-4,'k=k_{c}/k_0')
+%% Interface contour
+disp('Plotting interface contour')
+figure;
+h_s_grid = h_s_from_fi(fi_grid,alpha);
+X = linspace(xfrom, xto, Nx);
+Y = linspace(yfrom, yto, Ny);
+contour(X, Y,h_s_grid,nint);
+colorbar
 
-text(xx(100)./lambda,h_s(100)./lambda,'\phi_1/\lambda = 1')
-text(xx(100)./lambda2,h_s2(100)./lambda2,'\phi_1/\lambda = 0.5')
-text(xx(100)./lambda3,h_s3(100)./lambda3,'\phi_1/\lambda = 0.1')
+legend off
+axis equal
+hold on
 
-axis([min(xx./lambda) max(xx./lambda)+2 min(h_s)./lambda-5 max(fi)./lambda+2])
+ellipse_c(z_1,z_2,nu,'black');
+ellipse_c(zc1,zc2,linspace(1,1,length(zc1)),'red');
+plot(z_ref,'blue d')
+plot(zw,'blue *')
+title('Interface Head')
+xlabel('E-coordinate [-]')
+ylabel('N-coordinate [-]')
+disp('done')
 
+%% Hydraulic conductivity plot
+disp('Plotting hydraulic conductivity')
+fi_plot = linspace(-100,100,N);
+k_plot = k_from_fi(fi_plot,k0,lambda);
+figure;
+hold on
+plot(k_plot,fi_plot,'blue')
+grid minor
+title('Hydraulic Conductivity')
+xlabel('Hydraulic conductivity [m/day]')
+ylabel('Depth [m]')
+disp('done')
+
+
+%% Discharges (wells)
+
+figure;
+hold on
+grid minor
+
+bar(Q(28:60))
+title('Maximum Discharge of Wells')
+ylabel('Discharge [m^3/day]')
+xlabel('Well number')
+%% Map
+
+figure;
+axis equal
+hold on
+
+ellipse_c(z_1,z_2,nu,'black');
+ellipse_c(zc1,zc2,linspace(1,1,length(zc1)),'red');
+
+xlabel('E-coordinate [-]')
+ylabel('N-coordinate [-]')
+title('Map Brattö')
+
+plot(zw,'* blue')
+formatSpec = ' %d ';
+for ii = 1:nw
+str = sprintf(formatSpec,ii);
+tx = text(real(zw(ii)),imag(zw(ii)),str);
+if mod(ii,2)
+    tx.HorizontalAlignment = 'right';
+else
+    tx.HorizontalAlignment = 'left';
+end
+tx.FontSize = 8;
+end
+
+tx = text(real(z_1(11))-480,imag(z_2(11)),'Island boundary \phi = 0 m \rightarrow');
+tx.FontSize = 9;
+tx = text(real(z_1(27))-300,imag(z_2(27))+200,'Ditch \phi = 10 m \rightarrow');
+tx.FontSize = 9;
+tx = text(real(z_1(26))-400,imag(z_2(26)),'Lake \phi = 60 m \rightarrow');
+tx.FontSize = 9;
+tx = text(real(zc1(2)),imag(zc2(2)),'\gamma_1');
+tx.FontSize = 10;
+tx.Color = 'red';
+tx = text(real(zc1(10)),imag(zc2(10))+20,'\gamma_2');
+tx.FontSize = 10;
+tx.Color = 'red';
+tx = text(real(zc1(19)),imag(zc2(19)),'\gamma_3');
+tx.FontSize = 10;
+tx.Color = 'red';
+tx = text(real(zc1(21)),imag(zc2(21)),'\gamma_4');
+tx.FontSize = 10;
+tx.Color = 'red';
+
+%% Check
+fi_ref = func_fi(z_ref);
+fi_boundary = zeros(M,1);
+for ii = 1:M
+    fi_boundary(ii) = func_fi(lz_of_chi_e_array(1,nu(ii),z_1(ii),z_2(ii)));
+end
+
+disp('Head at reference point')
+disp(fi_ref)
+disp('Head at boundaries')
+disp(fi_boundary)
+
+disp('---------------')
+toc
+disp('---------------')
